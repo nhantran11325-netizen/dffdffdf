@@ -1,0 +1,16 @@
+{
+  "name": "keyauth-vercel-api",
+  "version": "1.0.0",
+  "description": "API backend for a Discord bot similar to KeyAuth, deployed on Vercel.",
+  "main": "api.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "mongoose": "^8.3.1"
+  }
+}
