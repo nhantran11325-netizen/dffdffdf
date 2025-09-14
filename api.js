@@ -8,13 +8,18 @@ app.use(express.json());
 // Kết nối với MongoDB
 const mongoUri = process.env.MONGO_URI;
 if (!mongoUri) {
-    throw new Error('Lỗi: Không tìm thấy biến môi trường MONGO_URI.');
+    throw new Error('Error: MONGO_URI environment variable not found.');
 }
 
 const connectDB = async () => {
     if (mongoose.connections[0].readyState) return;
-    await mongoose.connect(mongoUri);
-    console.log("Đã kết nối thành công với MongoDB!");
+    try {
+        await mongoose.connect(mongoUri);
+        console.log("Successfully connected to MongoDB!");
+    } catch (error) {
+        console.error("MongoDB connection error:", error);
+        throw new Error("Could not connect to the database.");
+    }
 };
 
 // Định nghĩa các Schema
@@ -44,24 +49,49 @@ const Key = mongoose.models.Key || mongoose.model('Key', keySchema);
 
 // Endpoint chính để xử lý tất cả các yêu cầu
 app.all('/api', async (req, res) => {
-    await connectDB();
-    const { action, payload } = req.body;
+    try {
+        await connectDB();
+    } catch (error) {
+        return res.status(500).json({ success: false, message: 'Database connection error.' });
+    }
 
-    // Giả định có xác thực
-    const user = await User.findOne({ discordId: payload.requesterId });
-    if (action !== 'enable' && action !== 'disable' && (!user || !user.isBotEnabled)) {
-        return res.status(403).json({ success: false, message: 'Bạn không có quyền sử dụng bot.' });
+    const { action, payload } = req.body;
+    
+    // Kiểm tra quyền truy cập, trừ các lệnh cho phép người dùng
+    if (action !== 'enable' && action !== 'disable') {
+        const user = await User.findOne({ discordId: payload.requesterId });
+        if (!user || !user.isBotEnabled) {
+            return res.status(403).json({ success: false, message: 'You do not have permission to use this bot.' });
+        }
     }
 
     try {
         let result;
         switch (action) {
             case 'createkey':
-            case 'bulkgen': {
+            case 'gen': {
+                const { appId, duration } = payload;
+                const quantity = 1;
+                const appExists = await App.findOne({ appId });
+                if (!appExists) {
+                    return res.status(404).json({ success: false, message: 'Application does not exist.' });
+                }
+
+                const expiresAt = duration ? new Date(Date.now() + duration * 1000 * 60 * 60 * 24) : null;
+                const randomKey = crypto.randomBytes(8).toString('hex').toUpperCase();
+                const newKey = new Key({ key: randomKey, appId, expiresAt });
+                await newKey.save();
+
+                result = { success: true, message: `Successfully created key.`, keys: [newKey.key] };
+                break;
+            }
+
+            case 'bulkgen':
+            case 'bulkcreatekey': {
                 const { appId, quantity, duration } = payload;
                 const appExists = await App.findOne({ appId });
                 if (!appExists) {
-                    return res.status(404).json({ success: false, message: 'Ứng dụng không tồn tại.' });
+                    return res.status(404).json({ success: false, message: 'Application does not exist.' });
                 }
 
                 const keys = [];
@@ -72,7 +102,7 @@ app.all('/api', async (req, res) => {
                 }
 
                 await Key.insertMany(keys);
-                result = { success: true, message: `Đã tạo ${quantity} key thành công.`, keys: keys.map(k => k.key) };
+                result = { success: true, message: `Successfully created ${quantity} keys.`, keys: keys.map(k => k.key) };
                 break;
             }
 
@@ -80,7 +110,7 @@ app.all('/api', async (req, res) => {
                 const { key } = payload;
                 const keyData = await Key.findOne({ key });
                 if (!keyData) {
-                    return res.status(404).json({ success: false, message: 'Key không tồn tại.' });
+                    return res.status(404).json({ success: false, message: 'Key does not exist.' });
                 }
                 result = { success: true, keyData };
                 break;
@@ -90,7 +120,7 @@ app.all('/api', async (req, res) => {
             case 'deleteexpired': {
                 const { appId } = payload;
                 const resultDB = await Key.deleteMany({ appId, expiresAt: { $lt: new Date() } });
-                result = { success: true, message: `Đã xóa ${resultDB.deletedCount} key hết hạn.` };
+                result = { success: true, message: `Successfully deleted ${resultDB.deletedCount} expired keys.` };
                 break;
             }
 
@@ -98,9 +128,9 @@ app.all('/api', async (req, res) => {
                 const { key } = payload;
                 const resultDB = await Key.deleteOne({ key });
                 if (resultDB.deletedCount === 0) {
-                    return res.status(404).json({ success: false, message: 'Key không tồn tại.' });
+                    return res.status(404).json({ success: false, message: 'Key does not exist.' });
                 }
-                result = { success: true, message: 'Đã xóa key thành công.' };
+                result = { success: true, message: 'Key successfully deleted.' };
                 break;
             }
 
@@ -120,27 +150,36 @@ app.all('/api', async (req, res) => {
                 break;
             }
 
-            case 'enable':
-            case 'disable': {
+            case 'enable': {
                 const { targetId } = payload;
-                const newStatus = action === 'enable';
                 const resultDB = await User.findOneAndUpdate(
                     { discordId: targetId },
-                    { isBotEnabled: newStatus },
+                    { isBotEnabled: true },
                     { new: true, upsert: true }
                 );
-                result = { success: true, message: `Đã ${newStatus ? 'cho phép' : 'gỡ quyền'} người dùng ${targetId}.` };
+                result = { success: true, message: `Successfully enabled user <@${targetId}>.` };
+                break;
+            }
+            
+            case 'disable': {
+                const { targetId } = payload;
+                const resultDB = await User.findOneAndUpdate(
+                    { discordId: targetId },
+                    { isBotEnabled: false },
+                    { new: true, upsert: true }
+                );
+                result = { success: true, message: `Successfully disabled user <@${targetId}>.` };
                 break;
             }
 
             default:
-                result = { success: false, message: 'Lệnh không hợp lệ.' };
+                result = { success: false, message: 'Invalid command.' };
         }
         res.status(200).json(result);
 
     } catch (error) {
-        console.error('Lỗi API:', error);
-        res.status(500).json({ success: false, message: 'Lỗi máy chủ.' });
+        console.error('API Error:', error);
+        res.status(500).json({ success: false, message: 'Server error occurred.' });
     }
 });
 
